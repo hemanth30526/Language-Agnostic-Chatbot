@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Language agnostic chatbot</title>
+    <link href="https://cdn.jsdelivr.net/npm/daisyui@2.51.6/dist/full.css" rel="stylesheet" type="text/css" />
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body data-theme="light" class="flex flex-col h-screen">
+    <div class="drawer drawer-mobile">
+        <input id="my-drawer-2" type="checkbox" class="drawer-toggle" />
+        <div class="drawer-content flex flex-col h-screen">
+            <!-- Header -->
+            <div class="flex-none flex justify-between items-center p-4 bg-base-100 border-b">
+                <h1 class="text-2xl font-bold">Chat bot</h1>
+                <div class="flex items-center">
+                    <span class="mr-2">Mode:</span>
+                    <select id="mode-select" class="select select-bordered select-sm">
+                        <option value="online">Online</option>
+                        <option value="offline">Offline</option>
+                    </select>
+                    <div id="offline-settings" class="flex items-center ml-4 hidden">
+                        <span class="mr-2">Base URL:</span>
+                        <input id="base-url-input" type="text" class="input input-bordered input-sm" value="http://192.168.56.1:1234/v1/chat/completions" />
+                    </div>
+                    <button id="voice-mode-btn" class="btn btn-sm btn-outline ml-4">Voice Mode</button>
+                    <label for="my-drawer-2" class="btn btn-primary drawer-button lg:hidden ml-4">Open drawer</label>
+                </div>
+            </div>
+
+            <!-- Chat Container -->
+            <div id="chat-container" class="flex-grow p-4 overflow-y-auto"></div>
+
+            <!-- Input Area -->
+            <div class="flex-none p-4 bg-base-100 border-t">
+                <div class="form-control relative">
+                    <textarea id="prompt-input" class="textarea textarea-bordered pb-12" placeholder="Type your message... (Enter to send, Ctrl+Enter for new line)"></textarea>
+                    <button id="send-button" class="btn btn-primary btn-sm absolute bottom-2 left-2">Send</button>
+                    <button id="record-button" class="btn btn-secondary mt-2 hidden">Record</button>
+                </div>
+            </div>
+
+            <audio id="response-audio" class="hidden"></audio>
+        </div>
+        <div class="drawer-side">
+            <label for="my-drawer-2" class="drawer-overlay"></label>
+            <ul class="menu p-4 w-80 bg-base-100 text-base-content">
+                <!-- Sidebar content here -->
+                <li><a id="new-chat-btn">New Chat Session</a></li>
+                <li class="menu-title"><span>Special Modes</span></li>
+                <li><a id="graph-mode-btn">Graph</a></li>
+                <li><a id="course-mode-btn">Course</a></li>
+            </ul>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script>
+        const chatContainer = document.getElementById('chat-container');
+        const promptInput = document.getElementById('prompt-input');
+        const sendButton = document.getElementById('send-button');
+        const modeSelect = document.getElementById('mode-select');
+        const offlineSettings = document.getElementById('offline-settings');
+        const baseUrlInput = document.querySelector('#base-url-input');
+        const voiceModeBtn = document.getElementById('voice-mode-btn');
+        const recordButton = document.getElementById('record-button');
+        const responseAudio = document.getElementById('response-audio');
+        const graphModeBtn = document.getElementById('graph-mode-btn');
+        const courseModeBtn = document.getElementById('course-mode-btn');
+        const newChatBtn = document.getElementById('new-chat-btn');
+
+        let activeMode = null; // Can be 'graph', 'course', or null
+        let conversation = [];
+        let isVoiceMode = false;
+        let mediaRecorder;
+        let audioChunks = [];
+
+        // --- Event Listeners for Controls ---
+
+        modeSelect.addEventListener('change', (e) => {
+            if (e.target.value === 'offline') {
+                offlineSettings.classList.remove('hidden');
+            } else {
+                offlineSettings.classList.add('hidden');
+            }
+        });
+
+        newChatBtn.addEventListener('click', () => {
+            resetChat(true); // Standard reset
+        });
+
+        graphModeBtn.addEventListener('click', () => {
+            resetChat(false); // Clear the chat without the default welcome message
+            activeMode = 'graph';
+            graphModeBtn.classList.add('active');
+            appendMessage('llm', 'Graph mode activated. Your prompts will now start with "GRAPH".');
+        });
+
+        courseModeBtn.addEventListener('click', () => {
+            resetChat(false); // Clear the chat without the default welcome message
+            activeMode = 'course';
+            courseModeBtn.classList.add('active');
+            appendMessage('llm', 'Course mode activated. Your prompts will now start with "COURSE".');
+        });
+
+        voiceModeBtn.addEventListener('click', () => {
+            isVoiceMode = !isVoiceMode;
+            voiceModeBtn.classList.toggle('btn-active');
+            promptInput.classList.toggle('hidden');
+            sendButton.classList.toggle('hidden');
+            recordButton.classList.toggle('hidden');
+        });
+
+        sendButton.addEventListener('click', sendMessage);
+        promptInput.addEventListener('keydown', (event) => {
+            // Send on Enter (but not Ctrl+Enter)
+            if (event.key === 'Enter' && !event.ctrlKey) {
+                event.preventDefault(); // Prevent new line
+                sendMessage();
+            }
+        });
+
+        // --- Core Functions ---
+
+        function resetChat(showWelcomeMessage = true) {
+            conversation = [];
+            chatContainer.innerHTML = '';
+            activeMode = null;
+            graphModeBtn.classList.remove('active');
+            courseModeBtn.classList.remove('active');
+            if (showWelcomeMessage) {
+                appendMessage('llm', 'Welcome! Select a mode or start a new chat.');
+            }
+        }
+
+        function appendMessage(sender, text) {
+            const messageElement = document.createElement('div');
+            messageElement.classList.add('chat', sender === 'user' ? 'chat-end' : 'chat-start');
+            
+            const bubble = document.createElement('div');
+            bubble.classList.add('chat-bubble');
+            bubble.innerHTML = marked.parse(text);
+
+            messageElement.appendChild(bubble);
+            chatContainer.appendChild(messageElement);
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+            return messageElement;
+        }
+
+        function sendMessage() {
+            let userPrompt = promptInput.value.trim();
+            if (!userPrompt) return;
+
+            let finalPrompt = userPrompt;
+
+            if (activeMode === 'graph') {
+                finalPrompt = 'GRAPH ' + userPrompt;
+            } else if (activeMode === 'course') {
+                finalPrompt = 'COURSE ' + userPrompt;
+            }
+
+            appendMessage('user', finalPrompt);
+            conversation.push({role: 'user', parts: [{text: finalPrompt}]});
+            promptInput.value = '';
+
+            const mode = modeSelect.value;
+
+        if (mode === 'online') {
+            sendOnlineMessage();
+        } else {
+            sendOfflineMessage();
+        }
+    }
+
+    // --- Communication Functions ---
+
+    async function sendOnlineMessage() {
+        const startTime = new Date();
+        const loadingMessage = appendMessage('llm', 'Generating...');
+
+        try {
+            const response = await fetch('/chat', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ conversation: conversation }),
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                throw new Error(`HTTP error! Status: ${response.status}. Body: ${errorText}`);
+            }
+
+            const data = await response.json(); // Parse the JSON response
+            const endTime = new Date();
+            const timeTaken = (endTime - startTime) / 1000;
+
+            const llmResponseContent = data.response; // Get the raw response
+            conversation.push({role: 'model', parts: [{text: llmResponseContent}]});
+
+            let statsText = `(${timeTaken.toFixed(2)}s)`;
+            if (data.prompt_token_count !== undefined && data.candidate_token_count !== undefined) {
+                statsText = `(${timeTaken.toFixed(2)}s, P:${data.prompt_token_count}, C:${data.candidate_token_count})`;
+            }
+            
+            // Append statsText to the parsed response
+            const finalHtmlContent = marked.parse(llmResponseContent) + 
+                                     `<span class="text-xs text-base-content opacity-50 ml-2">${statsText}</span>`;
+
+            loadingMessage.querySelector('.chat-bubble').innerHTML = finalHtmlContent;
+
+        } catch (error) {
+            console.error('Error communicating with backend:', error);
+            loadingMessage.querySelector('.chat-bubble').innerHTML = `Error: Could not connect to backend. (${error.message})`;
+        }
+    }
+
+    async function sendOfflineMessage() {
+        const baseUrl = baseUrlInput.value;
+        const startTime = new Date();
+        const loadingMessage = appendMessage('llm', 'Generating...');
+
+        try {
+            const messages = [
+                { role: "system", content: "You are a helpful assistant. Please respond in Markdown format." },
+                ...conversation.map(c => ({
+                    role: c.role === 'user' ? 'user' : 'assistant', 
+                    content: c.parts[0].text
+                }))
+            ];
+
+            const response = await fetch(baseUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    model: "gemma-3-4b-it",
+                    messages: messages,
+                    temperature: 0.7,
+                    max_tokens: 1000,
+                    stream: false
+                }),
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                throw new Error(`HTTP error! Status: ${response.status}. Body: ${errorText}`);
+            }
+
+            const data = await response.json();
+            const endTime = new Date();
+            const timeTaken = (endTime - startTime) / 1000;
+            
+            // Extracts token count from the standard OpenAI API 'usage' object
+            const promptTokenCount = data.prompt_token_count;
+            const candidateTokenCount = data.candidate_token_count;
+
+            if (data.choices && data.choices[0] && data.choices[0].message) {
+                const llmResponseContent = data.choices[0].message.content;
+                loadingMessage.querySelector('.chat-bubble').innerHTML = marked.parse(llmResponseContent);
+                conversation.push({role: 'model', parts: [{text: llmResponseContent}]});
+
+                const statsElement = document.createElement('span');
+                statsElement.classList.add('text-xs', 'text-base-content', 'opacity-50', 'ml-2');
+                
+                let statsText = `(${timeTaken.toFixed(2)}s)`;
+                if (promptTokenCount !== undefined && candidateTokenCount !== undefined) {
+                    statsText = `(${timeTaken.toFixed(2)}s, P:${promptTokenCount}, C:${candidateTokenCount})`;
+                }
+                statsElement.textContent = statsText;
+                
+                loadingMessage.appendChild(statsElement);
+            } else {
+                throw new Error('Invalid response structure from LLM server.');
+            }
+
+        } catch (error) {
+            console.error('Error communicating with LLM:', error);
+            loadingMessage.querySelector('.chat-bubble').innerHTML = `Error: Could not connect to LLM. (${error.message})`;
+        }
+    }
+
+    // --- Voice Recording Functions (functionality unchanged) ---
+
+    recordButton.addEventListener('click', () => {
+        if (mediaRecorder && mediaRecorder.state === 'recording') {
+            mediaRecorder.stop();
+            recordButton.textContent = 'Record';
+        } else {
+            navigator.mediaDevices.getUserMedia({ audio: true })
+                .then(stream => {
+                    mediaRecorder = new MediaRecorder(stream);
+                    mediaRecorder.start();
+                    recordButton.textContent = 'Stop';
+                    audioChunks = [];
+                    mediaRecorder.addEventListener('dataavailable', event => {
+                        audioChunks.push(event.data);
+                    });
+                    mediaRecorder.addEventListener('stop', () => {
+                        const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                        sendAudio(audioBlob);
+                    });
+                });
+        }
+    });
+
+    function sendAudio(audioBlob) {
+        const audioUrl = URL.createObjectURL(audioBlob);
+        const audioElement = new Audio(audioUrl);
+        audioElement.controls = true;
+        appendMessage('user', '').querySelector('.chat-bubble').appendChild(audioElement);
+
+        const loadingMessage = appendMessage('llm', 'Processing audio...');
+
+        const formData = new FormData();
+        formData.append('audio', audioBlob);
+
+        fetch('/voice-chat', { method: 'POST', body: formData })
+        .then(response => response.json())
+        .then(data => {
+            loadingMessage.querySelector('.chat-bubble').textContent = data.response;
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            loadingMessage.querySelector('.chat-bubble').innerHTML = 'Sorry, something went wrong with the voice chat.';
+        });
+    }
+    
+    // --- Initialize the Chat ---
+    resetChat();
+
+</script>
+</body>
+</html>

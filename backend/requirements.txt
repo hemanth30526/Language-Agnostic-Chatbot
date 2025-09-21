@@ -1,0 +1,7 @@
+Flask
+requests
+python-dotenv
+google-generativeai
+scikit-learn
+sarvamai
+Flask-Cors
